@@ -2,10 +2,15 @@ import os
 import json
 import requests
 import streamlit as st
-from langchain_community.llms import Ollama
+#from langchain_community.llms import Ollama
+from langchain_community.chat_models import ChatOpenAI
 from langchain_core.tools import tool, render_text_description
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
+
+# ============================================================
+# Helper Functions and Tool Definition
+# ============================================================
 
 # Load the Pokémon data from pokemon.json
 def load_pokemon_data(file_path: str = 'pokemon.json'):
@@ -40,6 +45,10 @@ def get_pokemon_info_from_url(pokemon_url: str):
 @tool
 def fetch_pokemon_info(pokemon_name: str) -> dict:
     """Fetch and return key information about a Pokémon."""
+    # Ensure the pokemon_name is not empty
+    if not pokemon_name.strip():
+        return {"error": "No Pokémon name provided."}
+
     # Load the Pokémon data
     pokemon_data = load_pokemon_data()
 
@@ -57,7 +66,6 @@ def fetch_pokemon_info(pokemon_name: str) -> dict:
     if "error" in full_data:
         return full_data
 
-    # Extract relevant information
     extracted_info = {
         "name": full_data.get("name", "N/A").capitalize(),
         "id": full_data.get("id", "N/A"),
@@ -68,15 +76,20 @@ def fetch_pokemon_info(pokemon_name: str) -> dict:
         "stats": {s["stat"]["name"]: s["base_stat"] for s in full_data.get("stats", [])},
         "sprite": full_data.get("sprites", {}).get("front_default", None),
     }
-
+    print(extracted_info)
     return extracted_info
 
 # ============================================================
-# Define the agent with a custom prompt template
+# Define the Agent with a Custom Prompt Template
 # ============================================================
 
-# Initialize the Ollama LLM
-llm = Ollama(model="llama3.1")
+# Initialize the Ollama LLM with lower temperature and stop sequences
+#llm = Ollama(
+#    model="llama3.1",
+#    temperature=0.3
+#)
+
+llm = ChatOpenAI(model_name="gpt-4o")
 
 # Create a list of tools
 tools = [fetch_pokemon_info]
@@ -84,74 +97,108 @@ tools = [fetch_pokemon_info]
 # Render text descriptions for the tools
 tool_descriptions = render_text_description(tools)
 
+# Define the prompt template
 template = """
 Assistant is a language model that provides detailed information about Pokémon.
 
 **Instructions:**
 
-1. **Use the 'fetch_pokemon_info' tool to retrieve Pokémon information when needed.**
+1. **Use the tools to retrieve Pokémon information when needed.**
+
+**Available Tools:**
+
+{tools}
+
+**Tool Names:**
+
+{tool_names}
 
 2. **Always follow the exact response format to avoid errors.**
 
 3. **Present the final answer in a clear and concise manner, summarizing key information without including raw JSON data.**
 
+4. **If you need to get information about multiple Pokémon, use the appropriate tool separately for each one.**
+
+5. **When specifying an Action, use exactly 'Action: [tool name]', without extra words.**
+
 **Response Format:**
 
-When using a tool:
+- **If you need to use a tool:**
 
-Thought: Do I need to use a tool? Yes Action: [tool name] Action Input: [input] Observation: [result]
+Thought: [Your thought process] Action: [tool name] Action Input: [input]
 
-arduino
-Copy code
-
-After receiving the observation, provide the final answer:
+- **After receiving the observation, you can provide the Final Answer:**
 
 Thought: [Your thought process] Final Answer: [Your answer to the user]
 
-sql
-Copy code
+**Important Notes:**
 
-**Important:** Do not include raw JSON in the final answer. Extract relevant information and present it neatly.
+- **Never include both an Action and a Final Answer in the same response.**
 
-Begin!
+- **Do not include the Observation in the Final Answer.**
 
-Previous conversation history:
+- **Do not include raw JSON in the Final Answer. Extract relevant information and present it neatly.**
 
-{chat_history}
+- **Only use the tools listed: {tool_names}**
+
+**Example:**
+
+- **User Input:** Who would win in a battle between Pikachu and Jigglypuff?
+
+- **Assistant's First Response:**
+
+Thought: I need to fetch information about Pikachu. Action: fetch_pokemon_info Action Input: Pikachu
+
+- **(After receiving the Observation from the tool)**
+
+- **Assistant's Second Response:**
+
+Thought: I need to fetch information about Jigglypuff to compare them. Action: fetch_pokemon_info Action Input: Jigglypuff
+
+- **(After receiving the Observation from the tool)**
+
+- **Assistant's Third Response:**
+
+Thought: I have retrieved information about both Pokémon and can now compare them. Final Answer: [Provide the comparison and answer to the user's question.]
+
+**Begin!**
 
 New input: {input}
-
 {agent_scratchpad}
 """
 
 # Define input variables
-input_variables = ["input", "agent_scratchpad", "chat_history"]
+input_variables = ["input", "agent_scratchpad"]
 
 # Create the PromptTemplate
 prompt_template = PromptTemplate(
-    template=template,
-    input_variables=input_variables,
-    partial_variables={
-        "tools": tool_descriptions,
-        "tool_names": ", ".join([t.name for t in tools])
-    }
+  template=template,
+  input_variables=input_variables,
+  partial_variables={
+      "tools": tool_descriptions,
+      "tool_names": ", ".join([t.name for t in tools])
+  }
 )
 
 # Create the ReAct agent
-agent = create_react_agent(llm, tools, prompt_template)
+agent = create_react_agent(
+  llm=llm,
+  tools=tools,
+  prompt=prompt_template
+)
+
+# Create the AgentExecutor
+agent_executor = AgentExecutor(
+  agent=agent,
+  tools=tools,
+  handle_parsing_errors=True,
+  verbose=True,
+  max_iterations=10
+)
 
 # ============================================================
 # Streamlit App
 # ============================================================
-
-# Initialize the agent executor
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    handle_parsing_errors=True,
-    verbose=True,
-    max_iterations=5
-)
 
 # Initialize Streamlit
 st.title("Pokémon Information Agent")
@@ -162,41 +209,50 @@ user_input = st.text_input("Enter your Pokémon question:")
 
 # Session state to store chat history
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = ""
+  st.session_state.chat_history = ""
 
 if "conversation" not in st.session_state:
-    st.session_state.conversation = []
+  st.session_state.conversation = []
 
 # Button to submit the question
 if st.button("Send"):
-    if user_input:
-        # Add the user input to the conversation history
-        st.session_state.conversation.append({"role": "user", "content": user_input})
+  if user_input:
+      # Add the user input to the conversation history
+      st.session_state.conversation.append({"role": "user", "content": user_input})
 
-        # Invoke the agent
-        response = agent_executor.invoke({
-            "input": user_input,
-            "chat_history": st.session_state.chat_history,
-            "agent_scratchpad": ""
-        })
+      # Invoke the agent
+      try:
+          response = agent_executor.invoke({
+              "input": user_input,
+              "agent_scratchpad": ""
+          })
 
-        # Extract the final answer
-        final_answer = response.get('output', 'No answer provided.')
+          # Check if response is not None
+          if response is not None:
+              # Extract the final answer
+              final_answer = response.get('output', 'No answer provided.')
+          else:
+              final_answer = 'No answer provided.'
 
-        # Display the question and answer
-        st.write(f"**Question:** {user_input}")
-        st.write(f"**Answer:** {final_answer}")
+          # Display the question and answer
+          st.write(f"**Question:** {user_input}")
+          st.write(f"**Answer:** {final_answer}")
 
-        # Add the response to the conversation history
-        st.session_state.conversation.append({"role": "assistant", "content": final_answer})
+          # Add the response to the conversation history
+          st.session_state.conversation.append({"role": "assistant", "content": final_answer})
 
-        # Update chat history
-        st.session_state.chat_history = "\n".join(
-            [f"{entry['role'].capitalize()}: {entry['content']}" for entry in st.session_state.conversation]
-        )
+          # Update chat history
+          st.session_state.chat_history = "\n".join(
+              [f"{entry['role'].capitalize()}: {entry['content']}" for entry in st.session_state.conversation]
+          )
+
+      except Exception as e:
+          st.write(f"An error occurred: {str(e)}")
+          # Optionally, add the error to the conversation history
+          st.session_state.conversation.append({"role": "assistant", "content": f"An error occurred: {str(e)}"})
 
 # Display the conversation history
 if st.session_state.conversation:
-    st.write("## Conversation History")
-    for entry in st.session_state.conversation:
-        st.write(f"**{entry['role'].capitalize()}:** {entry['content']}")
+  st.write("## Conversation History")
+  for entry in st.session_state.conversation:
+      st.write(f"**{entry['role'].capitalize()}:** {entry['content']}")
